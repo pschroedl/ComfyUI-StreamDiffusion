@@ -6,6 +6,23 @@ import folder_paths
 import numpy as np
 from .streamdiffusionwrapper import StreamDiffusionWrapper
 
+#NOTE: these commands could possibly be handled by a model loader
+# huggingface-cli download KBlueLeaf/kohaku-v2.1 --include "*.safetensors" "*.json" "*.txt" --exclude ".onnx" ".onnx_data" --cache-dir models
+# huggingface-cli download stabilityai/sd-turbo --include "*.safetensors" "*.json" "*.txt" --exclude ".onnx" ".onnx_data" --cache-dir models
+
+
+#NOTE: additional LCM https://huggingface.co/latent-consistency/lcm-lora-sdxl
+
+#NOTE: image2image could be implicit when image is passed in
+
+#NOTE: should we infer width and height when input image is provided? Enforce width and height settings specified in the node?
+
+#NOTE: for acceleration options, should we expose other parameters like warmup, do_add_noise, and use_denoising_batch?
+
+#NOTE: expose seed?
+
+#NOTE: 
+
 # Define constants for model paths
 MODELS_ROOT = "/workspace/models"
 ENGINE_DIR = os.path.join(MODELS_ROOT, "StreamDiffusion--engines")
@@ -119,17 +136,53 @@ class StreamDiffusionVaeLoader:
     def load_vae(self, vae_path):
         return (vae_path,)
 
-class StreamDiffusionLoaderNode:
+class StreamDiffusionBaseModelLoader:
+    """Loads just the base model without additional components"""
     @classmethod
     def INPUT_TYPES(s):
         return {
             "required": {
                 "model_id_or_path": (["stabilityai/sd-turbo", "KBlueLeaf/kohaku-v2.1"], {"default": "stabilityai/sd-turbo"}),
-                "t_index_list": ("STRING", {"default": "39,35"}),
-                "mode": (["img2img", "txt2img"], {"default": "img2img"}),
+                "acceleration": (["tensorrt", "xformers", "none"], {"default": "tensorrt"}),
                 "width": ("INT", {"default": 512, "min": 64, "max": 2048}),
                 "height": ("INT", {"default": 512, "min": 64, "max": 2048}),
-                "acceleration": (["tensorrt", "xformers", "none"], {"default": "tensorrt"}),
+            }
+        }
+
+    RETURN_TYPES = ("SD_BASE_MODEL",)
+    FUNCTION = "load_base_model"
+    CATEGORY = "StreamDiffusion"
+
+    def load_base_model(self, model_id_or_path, acceleration, width, height):
+        # Get local path if available
+        model_path = get_model_path(model_id_or_path)
+        if model_path != model_id_or_path:
+            print(f"Using local model path: {model_path}")
+            model_id_or_path = model_path
+
+#TODO remove this and create wrapper object only once in configure node
+        # Create basic StreamDiffusion instance without additional components
+        wrapper = StreamDiffusionWrapper(
+            model_id_or_path=model_id_or_path,
+            t_index_list=[],  # Will be set in configure node
+            mode="img2img",   # Will be set in configure node
+            width=width,
+            height=height,
+            acceleration=acceleration,
+            engine_dir=ENGINE_DIR
+        )
+        
+        return (wrapper,)
+
+class StreamDiffusionConfigureNode:
+    """Configures loaded model with specific parameters"""
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "base_model": ("SD_BASE_MODEL",),
+                "t_index_list": ("STRING", {"default": "39,35"}),
+                "mode": (["img2img", "txt2img"], {"default": "img2img"}),
                 "frame_buffer_size": ("INT", {"default": 1, "min": 1, "max": 16}),
                 "use_lcm_lora": ("BOOLEAN", {"default": True}),
                 "use_tiny_vae": ("BOOLEAN", {"default": True}),
@@ -143,50 +196,37 @@ class StreamDiffusionLoaderNode:
         }
 
     RETURN_TYPES = ("STREAMDIFFUSION",)
-    FUNCTION = "load_model"
+    FUNCTION = "configure_model"
     CATEGORY = "StreamDiffusion"
 
-    def load_model(self, model_id_or_path, t_index_list, mode, width, height, acceleration, 
-                  frame_buffer_size, use_lcm_lora, use_tiny_vae, cfg_type, 
-                  lora_dict=None, lcm_lora_path=None, vae_path=None):
+    def configure_model(self, base_model, t_index_list, mode, frame_buffer_size, 
+                       use_lcm_lora, use_tiny_vae, cfg_type,
+                       lora_dict=None, lcm_lora_path=None, vae_path=None):
         
-        # Parse t_index_list from string to actual list
-        t_index_list = [int(x.strip()) for x in t_index_list.split(",")]
-
-        # Convert empty strings to None for optional parameters
-        vae_path = vae_path.strip() if vae_path.strip() else None
-
-        # Handle local model paths
-        if model_id_or_path in ["stabilityai/sd-turbo", "KBlueLeaf/kohaku-v2.1"]:
-            model_path = get_model_path(model_id_or_path)
-            if model_path != model_id_or_path:  # Only use local path if it exists
-                model_id_or_path = model_path
-                print(f"Using local model path: {model_path}")
-
+        # Parse t_index_list from string
+        t_indices = [int(x.strip()) for x in t_index_list.split(",")]
+        
+        # Update base model configuration
+        base_model.t_index_list = t_indices
+        base_model.mode = mode
+        base_model.frame_buffer_size = frame_buffer_size
+        base_model.use_lcm_lora = use_lcm_lora
+        base_model.use_tiny_vae = use_tiny_vae
+        base_model.cfg_type = cfg_type
+        
+        # Apply optional components
         if lora_dict:
             print(f"Using LoRAs: {lora_dict}")
-        
+            base_model.lora_dict = lora_dict
+            
         if lcm_lora_path:
             print(f"Using custom LCM LoRA: {lcm_lora_path}")
-
-        wrapper = StreamDiffusionWrapper(
-            model_id_or_path=model_id_or_path,
-            t_index_list=t_index_list,
-            lora_dict=lora_dict,
-            mode=mode,
-            lcm_lora_id=lcm_lora_path,
-            vae_id=vae_path,
-            width=width,
-            height=height,
-            frame_buffer_size=frame_buffer_size,
-            acceleration=acceleration,
-            use_lcm_lora=use_lcm_lora,
-            use_tiny_vae=use_tiny_vae,
-            cfg_type=cfg_type,
-            engine_dir=ENGINE_DIR
-        )
+            base_model.lcm_lora_id = lcm_lora_path
+            
+        if vae_path:
+            base_model.vae_id = vae_path.strip()
         
-        return (wrapper,)
+        return (base_model,)
 
 class StreamDiffusionGenerateNode:
     @classmethod
@@ -223,7 +263,7 @@ class StreamDiffusionGenerateNode:
 
         # Generate based on mode
         if stream_model.mode == "img2img" and image is not None:
-            # Convert from BHWC to BCHW for the VAE
+            # VAEs eexpect CHW
             image_tensor = image[0].permute(2, 0, 1)  # HWC -> CHW
             image_tensor = image_tensor.unsqueeze(0)  # Add batch dimension: CHW -> BCHW
             # Ensure values are in [-1, 1] range as expected by the VAE
@@ -243,7 +283,8 @@ class StreamDiffusionGenerateNode:
         return (output_tensor,)
 
 NODE_CLASS_MAPPINGS = {
-    "StreamDiffusionLoader": StreamDiffusionLoaderNode,
+    "StreamDiffusionBaseLoader": StreamDiffusionBaseModelLoader,
+    "StreamDiffusionConfigure": StreamDiffusionConfigureNode,
     "StreamDiffusionGenerate": StreamDiffusionGenerateNode,
     "StreamDiffusionLoraLoader": StreamDiffusionLoraLoader,
     "StreamDiffusionLcmLoraLoader": StreamDiffusionLcmLoraLoader,
@@ -251,9 +292,10 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "StreamDiffusionLoader": "Load StreamDiffusion Model",
-    "StreamDiffusionGenerate": "Generate with StreamDiffusion",
-    "StreamDiffusionLoraLoader": "Load StreamDiffusion LoRA",
-    "StreamDiffusionLcmLoraLoader": "Load StreamDiffusion LCM LoRA",
-    "StreamDiffusionVaeLoader": "Load StreamDiffusion VAE",
+    "StreamDiffusionBaseLoader": "SD Base Model Loader",
+    "StreamDiffusionConfigure": "SD Model Configure",
+    "StreamDiffusionGenerate": "StreamDiffusion Generator",
+    "StreamDiffusionLoraLoader": "StreamDiffusion LoRA Loader",
+    "StreamDiffusionLcmLoraLoader": "StreamDiffusion LCM LoRA Loader",
+    "StreamDiffusionVaeLoader": "StreamDiffusion VAE Loader",
 }
