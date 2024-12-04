@@ -9,7 +9,7 @@ setup(
         "torchvision==0.16.0",
         "xformers",
         "huggingface-hub==0.23.2",
-        "diffusers==0.30.0",
+        "diffusers>=0.30.0",
         "protobuf==5.27.2"
     ],
     python_requires=">=3.10",
