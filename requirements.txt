@@ -1,7 +1,7 @@
 torch>=2.3.0
 torchvision>=0.16.0
 xformers
-huggingface-hub==0.23.2
+huggingface-hub==0.25.0
 diffusers==0.30.0
 protobuf==3.20.2
 git+https://github.com/pschroedl/StreamDiffusion.git@ab5c9c1#egg=streamdiffusion[tensorrt]

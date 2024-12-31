@@ -8,7 +8,7 @@ setup(
         "torch==2.1.0",
         "torchvision==0.16.0",
         "xformers",
-        "huggingface-hub==0.23.2",
+        "huggingface-hub==0.25.0",
         "diffusers==0.30.0",
         "protobuf==5.27.2"
     ],
