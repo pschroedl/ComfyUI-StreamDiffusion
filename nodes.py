@@ -7,6 +7,8 @@ import inspect
 import os
 import sys
 import functools
+from PIL import Image
+from torchvision.transforms.functional import to_tensor
 
 ENGINE_DIR = os.path.join(folder_paths.models_dir,
                           "tensorrt/StreamDiffusion-engines")
@@ -347,10 +349,23 @@ class StreamDiffusionSampler:
                 output = model(image=image_tensor)
                 
                 # Convert CHW to BHWC
-                output = output.permute(1, 2, 0)
-                output = output.unsqueeze(0)  # Add batch dimension
+                # output = output.permute(1, 2, 0)
+                # output = output.unsqueeze(0)  # Add batch dimension
+
+                # make sure we have a tensor 
+                if isinstance(output, Image.Image):
+                    # PIL => Tensor [C, H, W]
+                    output = to_tensor(output)
+                elif isinstance(output, torch.Tensor):
+                    pass  # already good
+                else:
+                    # e.g. numpy array H × W × C
+                    output = torch.as_tensor(output).permute(2, 0, 1)
+    
+                # Convert CHW → BHWC
+                output_tensor = output.permute(1, 2, 0).unsqueeze(0)
                 
-                outputs.append(output)
+                outputs.append(output_tensor)
             
             # Stack outputs
             output_tensor = torch.cat(outputs, dim=0)
@@ -359,9 +374,23 @@ class StreamDiffusionSampler:
             # Text to image generation
             output = model.txt2img()
             # Convert CHW to BHWC
-            output = output.permute(1, 2, 0)
-            output = output.unsqueeze(0)  # Add batch dimension
+            # output = output.permute(1, 2, 0)
+            # output = output.unsqueeze(0)  # Add batch dimension
+            # make sure we have a tensor 
+            if isinstance(output, Image.Image):
+                # PIL => Tensor [C, H, W]
+                output = to_tensor(output)
+            elif isinstance(output, torch.Tensor):
+                pass  # already good
+            else:
+                # e.g. numpy array H × W × C
+                output = torch.as_tensor(output).permute(2, 0, 1)
+
+            # Convert CHW → BHWC
+            output_tensor = output.permute(1, 2, 0).unsqueeze(0)
             
+            outputs.append(output_tensor)
+        
         return (output_tensor,)
 
 class StreamDiffusionConfigMixin:
