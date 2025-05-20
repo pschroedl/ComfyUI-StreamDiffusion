@@ -1,9 +1,9 @@
 from setuptools import setup
 
 setup(
-    name="streamdiffusion",
+    name="ComfyUI-StreamDiffusion",
     version="0.1.0",
-    description="StreamDiffusion project dependencies",
+    description="ComfyUI-StreamDiffusion project dependencies",
     install_requires=[
         "torch>=2.3.0",
         "torchvision>=0.16.0",
