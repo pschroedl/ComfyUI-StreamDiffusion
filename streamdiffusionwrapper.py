@@ -45,7 +45,7 @@ class StreamDiffusionWrapper:
         use_denoising_batch: bool = True,
         cfg_type: Literal["none", "full", "self", "initialize"] = "self",
         seed: int = 2,
-        use_safety_checker: bool = True,
+        use_safety_checker: bool = False,
         engine_dir: Optional[Union[str, Path]] = "engines",
     ):
         """
@@ -114,10 +114,6 @@ class StreamDiffusionWrapper:
         use_safety_checker : bool, optional
             Whether to use safety checker or not, by default False.
         """
-        if acceleration == "tensorrt":
-            import streamdiffusion._hf_tracing_patches as _tp
-            _tp.apply_all_patches()
-
         self.sd_turbo = "turbo" in model_id_or_path
 
         if mode == "txt2img":
