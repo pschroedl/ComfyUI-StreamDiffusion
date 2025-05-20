@@ -3,60 +3,92 @@ import os
 import folder_paths
 from .streamdiffusionwrapper import StreamDiffusionWrapper
 import inspect
+import inspect
+import os
+import sys
+import functools
 
-ENGINE_DIR = os.path.join(folder_paths.models_dir, "StreamDiffusion--engines")
-LIVE_PEER_CHECKPOINT_DIR = os.path.join(folder_paths.models_dir,"models/ComfyUI--models/checkpoints")
+ENGINE_DIR = os.path.join(folder_paths.models_dir,
+                          "tensorrt/StreamDiffusion-engines")
+LIVE_PEER_CHECKPOINT_DIR = os.path.join(folder_paths.models_dir,
+                                        "models/ComfyUI--models/checkpoints")
 
 _wrapper_params = None
 def _get_wrapper_params():
-    """Private function to get and cache StreamDiffusionWrapper parameters so consequential defaults for nodes are centrally managed"""
+    """Return cached StreamDiffusionWrapper defaults with our overrides applied."""
     global _wrapper_params
     if _wrapper_params is None:
-        print("Getting wrapper params")
+        print("[wrapper] collecting parameters …")
         params = inspect.signature(StreamDiffusionWrapper).parameters
-        
-        # Store parameters with overridden defaults
-        _wrapper_params = {
-            name: param.default for name, param in params.items()
-        }
-        # Override specific defaults
-        _wrapper_params['engine_dir'] = os.path.join(folder_paths.models_dir, 'StreamDiffusion--engines')
-        _wrapper_params['output_type'] = 'pt'
-        
+
+        _wrapper_params = {name: p.default for name, p in params.items()}
+        _wrapper_params["engine_dir"] = ENGINE_DIR
+        _wrapper_params["output_type"] = "pt"
+
+        # show what we ended up with
+        print("[wrapper] defaults:", _wrapper_params)
+
     return _wrapper_params
 
-def get_engine_configs():
-    """Scan StreamDiffusion--engines directory for available engine configurations"""
+
+def _dbg(msg, *, verbose):
+    """Lightweight debug helper."""
+    if verbose:
+        print(msg, file=sys.stderr)
+
+@functools.lru_cache(maxsize=1)
+def get_engine_configs(*, verbose=True):
+    """
+    Scan the TensorRT engine directory and return a list of valid engine sets.
+
+    A valid set = a folder that contains a sub-folder with `unet.engine`
+                 **and** both `vae_encoder.engine` and `vae_decoder.engine`.
+    """
+    # Allow turning on verbosity via env var as well.
+    verbose = verbose or bool(os.getenv("DEBUG_SD_ENGINES"))
+
+    _dbg(f"[scan] ENGINE_DIR = {ENGINE_DIR}", verbose=verbose)
+
     if not os.path.exists(ENGINE_DIR):
+        _dbg("[scan] directory does not exist – nothing to return", verbose=verbose)
         return []
-    
+
     configs = []
-    # Look for parent directories that contain complete engine sets
-    for parent_dir in os.listdir(ENGINE_DIR):
+
+    for parent_dir in sorted(os.listdir(ENGINE_DIR)):
         parent_path = os.path.join(ENGINE_DIR, parent_dir)
+        _dbg(f"[scan] checking {parent_path}", verbose=verbose)
+
         if not os.path.isdir(parent_path):
+            _dbg("        (skipped: not a directory)", verbose=verbose)
             continue
-            
-        # Look for subdirectories containing the engines
-        has_unet = False
-        has_vae = False
-        
-        for subdir in os.listdir(parent_path):
+
+        has_unet = has_vae = False
+
+        for subdir in sorted(os.listdir(parent_path)):
             subdir_path = os.path.join(parent_path, subdir)
             if not os.path.isdir(subdir_path):
                 continue
-                
-            # Check for engines
-            if os.path.exists(os.path.join(subdir_path, "unet.engine")):
+
+            unet_path = os.path.join(subdir_path, "unet.engine")
+            vae_enc = os.path.join(subdir_path, "vae_encoder.engine")
+            vae_dec = os.path.join(subdir_path, "vae_decoder.engine")
+
+            if os.path.exists(unet_path):
                 has_unet = True
-            if os.path.exists(os.path.join(subdir_path, "vae_encoder.engine")) and \
-               os.path.exists(os.path.join(subdir_path, "vae_decoder.engine")):
+                _dbg(f"        found UNet  : {unet_path}", verbose=verbose)
+
+            if os.path.exists(vae_enc) and os.path.exists(vae_dec):
                 has_vae = True
-        
-        # Only add if we found both UNet and VAE engines
+                _dbg(f"        found VAE   : {vae_enc}, {vae_dec}", verbose=verbose)
+
         if has_unet and has_vae:
+            _dbg(f"[scan] ✔ valid engine set: {parent_dir}", verbose=verbose)
             configs.append(parent_dir)
-    
+        else:
+            _dbg(f"[scan] ✖ incomplete (UNet={has_unet}, VAE={has_vae})", verbose=verbose)
+
+    _dbg(f"[scan] completed. {len(configs)} valid set(s) found.", verbose=verbose)
     return configs
 
 def get_live_peer_checkpoints():
