@@ -366,9 +366,7 @@ class StreamDiffusionSampler:
 
             # Convert CHW → BHWC
             output_tensor = output.permute(1, 2, 0).unsqueeze(0)
-            
-            outputs.append(output_tensor)
-        
+
         return (output_tensor,)
 
     def ensure_type_tensor(self, output):
