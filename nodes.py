@@ -7,6 +7,8 @@ import inspect
 import os
 import sys
 import functools
+from PIL import Image
+from torchvision.transforms.functional import to_tensor
 
 ENGINE_DIR = os.path.join(folder_paths.models_dir,
                           "tensorrt/StreamDiffusion-engines")
@@ -37,7 +39,7 @@ def _dbg(msg, *, verbose):
         print(msg, file=sys.stderr)
 
 @functools.lru_cache(maxsize=1)
-def get_engine_configs(*, verbose=True):
+def get_engine_configs(*, verbose=False):
     """
     Scan the TensorRT engine directory and return a list of valid engine sets.
 
@@ -346,11 +348,12 @@ class StreamDiffusionSampler:
 
                 output = model(image=image_tensor)
                 
-                # Convert CHW to BHWC
-                output = output.permute(1, 2, 0)
-                output = output.unsqueeze(0)  # Add batch dimension
+                output = self.ensure_type_tensor(output)
+    
+                # Convert CHW → BHWC
+                output_tensor = output.permute(1, 2, 0).unsqueeze(0)
                 
-                outputs.append(output)
+                outputs.append(output_tensor)
             
             # Stack outputs
             output_tensor = torch.cat(outputs, dim=0)
@@ -358,11 +361,24 @@ class StreamDiffusionSampler:
         else:
             # Text to image generation
             output = model.txt2img()
-            # Convert CHW to BHWC
-            output = output.permute(1, 2, 0)
-            output = output.unsqueeze(0)  # Add batch dimension
-            
+
+            output = self.ensure_type_tensor(output)
+
+            # Convert CHW → BHWC
+            output_tensor = output.permute(1, 2, 0).unsqueeze(0)
+
         return (output_tensor,)
+
+    def ensure_type_tensor(self, output):
+        if isinstance(output, Image.Image):
+                # PIL => Tensor [C, H, W]
+            output = to_tensor(output)
+        elif isinstance(output, torch.Tensor):
+            pass  # already good
+        else:
+                # e.g. numpy array H × W × C
+            output = torch.as_tensor(output).permute(2, 0, 1)
+        return output
 
 class StreamDiffusionConfigMixin:
     @staticmethod
