@@ -4,7 +4,7 @@ import sys
 
 # Add the current script's directory to Python path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-from wrapper import StreamDiffusionWrapper
+from streamdiffusionwrapper import StreamDiffusionWrapper
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Build TensorRT engines for StreamDiffusion")
