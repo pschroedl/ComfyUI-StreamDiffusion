@@ -4,7 +4,7 @@ import gc
 import os
 import traceback
 from pathlib import Path
-from typing import Dict, List, Literal, Optional, Union
+from typing import Dict, List, Literal, Optional, Union, Tuple
 
 import numpy as np
 import torch
@@ -12,6 +12,9 @@ from diffusers import AutoencoderTiny, StableDiffusionPipeline
 from PIL import Image
 from streamdiffusion import StreamDiffusion
 from streamdiffusion.image_utils import postprocess_image
+
+# Import for ControlNet support
+from diffusers.models import ControlNetModel
 
 torch.set_grad_enabled(False)
 torch.backends.cuda.matmul.allow_tf32 = True
@@ -47,6 +50,9 @@ class StreamDiffusionWrapper:
         seed: int = 2,
         use_safety_checker: bool = False,
         engine_dir: Optional[Union[str, Path]] = "engines",
+        # Added parameters for ControlNet
+        controlnet: Optional[ControlNetModel] = None,
+        controlnet_conditioning_scale: float = 1.0,
     ):
         """
         Initializes the StreamDiffusionWrapper.
@@ -113,6 +119,10 @@ class StreamDiffusionWrapper:
             The seed, by default 2.
         use_safety_checker : bool, optional
             Whether to use safety checker or not, by default False.
+        controlnet : Optional[ControlNetModel], optional
+            The ControlNet model to use, by default None.
+        controlnet_conditioning_scale : float, optional
+            The scale for the ControlNet output, by default 1.0.
         """
         if acceleration == "tensorrt":
             import streamdiffusion._hf_tracing_patches as _tp
@@ -152,6 +162,20 @@ class StreamDiffusionWrapper:
 
         self.use_denoising_batch = use_denoising_batch
         self.use_safety_checker = use_safety_checker
+        
+        # Initialize lists to store multiple ControlNets
+        self.controlnets = []
+        self.controlnet_images = []
+        self.controlnet_scales = []
+        
+        # Store legacy single ControlNet (if provided) for backwards compatibility
+        if controlnet is not None:
+            self.add_controlnet(controlnet, None, controlnet_conditioning_scale)
+        
+        # Store ControlNet model and parameters
+        self.controlnet = controlnet
+        self.controlnet_conditioning_scale = controlnet_conditioning_scale
+        self.controlnet_image = None
 
         self.stream: StreamDiffusion = self._load_model(
             model_id_or_path=model_id_or_path,
@@ -178,6 +202,57 @@ class StreamDiffusionWrapper:
             self.stream.enable_similar_image_filter(
                 similar_image_filter_threshold, similar_image_filter_max_skip_frame
             )
+    
+    def add_controlnet(self, controlnet, control_image=None, scale=1.0):
+        """
+        Add a ControlNet model to the pipeline
+        
+        Parameters
+        ----------
+        controlnet : ControlNetModel
+            The ControlNet model to add
+        control_image : torch.Tensor, optional
+            The control image tensor, by default None
+        scale : float, optional
+            The conditioning scale, by default 1.0
+        """
+        self.controlnets.append(controlnet)
+        self.controlnet_images.append(control_image)  # Can be None initially
+        self.controlnet_scales.append(scale)
+    
+    def clear_controlnets(self):
+        """Remove all ControlNet models from the pipeline"""
+        self.controlnets = []
+        self.controlnet_images = []
+        self.controlnet_scales = []
+        
+    def update_controlnet_image_for_batch(self, batch_index):
+        """
+        Update ControlNet images for a specific batch index
+        
+        Parameters
+        ----------
+        batch_index : int
+            The index in the batch to use for ControlNet images
+            
+        Returns
+        -------
+        bool
+            True if any ControlNet images were updated, False otherwise
+        """
+        # Check if we have batch images stored
+        if not hasattr(self, 'controlnet_batch_images') or not self.controlnet_batch_images:
+            return False
+            
+        updated = False
+        # For each ControlNet that has batch images stored
+        for controlnet_idx, batch_images in self.controlnet_batch_images.items():
+            if controlnet_idx < len(self.controlnet_images) and batch_index < len(batch_images):
+                # Update the image for this ControlNet to the one for the current batch index
+                self.controlnet_images[controlnet_idx] = batch_images[batch_index]
+                updated = True
+                
+        return updated
 
     def prepare(
         self,
@@ -186,6 +261,7 @@ class StreamDiffusionWrapper:
         num_inference_steps: int = 50,
         guidance_scale: float = 1.2,
         delta: float = 1.0,
+        controlnet_image: Optional[Union[str, Image.Image, torch.Tensor]] = None,
     ) -> None:
         """
         Prepares the model for inference.
@@ -201,6 +277,10 @@ class StreamDiffusionWrapper:
         delta : float, optional
             The delta multiplier of virtual residual noise,
             by default 1.0.
+        controlnet_image : Optional[Union[str, Image.Image, torch.Tensor]], optional
+            The conditioning image for ControlNet, by default None.
+        controlnet_image : Optional[Union[str, Image.Image, torch.Tensor]], optional
+            The conditioning image for ControlNet, by default None.
         """
         self.stream.prepare(
             prompt,
@@ -209,6 +289,101 @@ class StreamDiffusionWrapper:
             guidance_scale=guidance_scale,
             delta=delta,
         )
+        
+        # Process and store the controlnet image if provided (legacy support)
+        if controlnet_image is not None and len(self.controlnets) > 0:
+            if isinstance(controlnet_image, str):
+                controlnet_image = Image.open(controlnet_image).convert("RGB").resize((self.width, self.height))
+            if isinstance(controlnet_image, Image.Image):
+                controlnet_image = controlnet_image.convert("RGB").resize((self.width, self.height))
+                
+            # Store the conditioning image in the first slot (for legacy support)
+            self.controlnet_images[0] = self.prepare_controlnet_image(controlnet_image)
+
+    def prepare_controlnet_image(self, image):
+        """
+        Prepare an image for ControlNet input
+        
+        Parameters
+        ----------
+        image : Union[str, Image.Image, torch.Tensor]
+            The input control image
+            
+        Returns
+        -------
+        torch.Tensor
+            Processed image tensor ready for ControlNet
+        """
+        # This function would depend on the specific ControlNet implementation
+        # For now, we'll use a simplified version assuming the image is already preprocessed
+        if isinstance(image, torch.Tensor):
+            return image.to(device=self.device, dtype=self.dtype)
+        
+        # For PIL images or file paths, preprocess appropriately
+        # You may need a more complex preprocessing pipeline depending on the ControlNet
+        from diffusers.utils import load_image
+        if isinstance(image, str):
+            image = load_image(image)
+        
+        # Convert to tensor and return
+        image = self.stream.pipe.image_processor.preprocess(image).to(device=self.device, dtype=self.dtype)
+        return image
+
+    def get_controlnet_outputs(self, x_t_latent, t_list, prompt_embeds):
+        """
+        Process input through all ControlNets to get combined conditioning
+        
+        Parameters
+        ----------
+        x_t_latent : torch.Tensor
+            Input latent tensor
+        t_list : torch.Tensor
+            Timestep tensor
+        prompt_embeds : torch.Tensor
+            Text embeddings
+            
+        Returns
+        -------
+        Tuple[List[torch.Tensor], torch.Tensor]
+            Combined outputs from all ControlNets:
+            - down_block_res_samples: List of tensors for each resolution level
+            - mid_block_res_sample: Tensor for mid-block
+        """
+        if not self.controlnets or not any(img is not None for img in self.controlnet_images):
+            return None, None
+            
+        # Initialize with empty tensors or None
+        down_block_res_samples = None
+        mid_block_res_sample = None
+        
+        # Process each ControlNet
+        for i, (controlnet, control_image, scale) in enumerate(
+            zip(self.controlnets, self.controlnet_images, self.controlnet_scales)
+        ):
+            if controlnet is None or control_image is None or scale == 0:
+                continue
+                
+            # Forward pass through ControlNet
+            down_samples, mid_sample = controlnet(
+                x_t_latent,
+                t_list,
+                encoder_hidden_states=prompt_embeds,
+                controlnet_cond=control_image,
+                conditioning_scale=scale,
+                return_dict=False,
+            )
+            
+            # Combine outputs
+            if down_block_res_samples is None:
+                down_block_res_samples = down_samples
+                mid_block_res_sample = mid_sample
+            else:
+                # Add contributions from this ControlNet
+                for j in range(len(down_block_res_samples)):
+                    down_block_res_samples[j] += down_samples[j]
+                mid_block_res_sample += mid_sample
+        
+        return down_block_res_samples, mid_block_res_sample
 
     def __call__(
         self,
@@ -254,10 +429,109 @@ class StreamDiffusionWrapper:
         if prompt is not None:
             self.stream.update_prompt(prompt)
 
-        if self.sd_turbo:
-            image_tensor = self.stream.txt2img_sd_turbo(self.batch_size)
+        # Modify StreamDiffusion's txt2img method to use ControlNet if available
+        if self.controlnets and any(img is not None for img in self.controlnet_images):
+            # Monkey patch the unet_step method to use ControlNet
+            original_unet_step = self.stream.unet_step
+            
+            def patched_unet_step(x_t_latent, t_list, idx=None):
+                if self.stream.guidance_scale > 1.0 and (self.stream.cfg_type == "initialize"):
+                    x_t_latent_plus_uc = torch.concat([x_t_latent[0:1], x_t_latent], dim=0)
+                    t_list_expanded = torch.concat([t_list[0:1], t_list], dim=0)
+                elif self.stream.guidance_scale > 1.0 and (self.stream.cfg_type == "full"):
+                    x_t_latent_plus_uc = torch.concat([x_t_latent, x_t_latent], dim=0)
+                    t_list_expanded = torch.concat([t_list, t_list], dim=0)
+                else:
+                    x_t_latent_plus_uc = x_t_latent
+                    t_list_expanded = t_list
+                
+                # Get combined ControlNet outputs
+                down_block_res_samples, mid_block_res_sample = self.get_controlnet_outputs(
+                    x_t_latent_plus_uc, t_list_expanded, self.stream.prompt_embeds
+                )
+                
+                # Call UNet with ControlNet outputs
+                model_pred = self.stream.unet(
+                    x_t_latent_plus_uc,
+                    t_list_expanded,
+                    encoder_hidden_states=self.stream.prompt_embeds,
+                    down_block_additional_residuals=down_block_res_samples,
+                    mid_block_additional_residual=mid_block_res_sample,
+                    return_dict=False,
+                )[0]
+                
+                # Continue with the original logic
+                if self.stream.guidance_scale > 1.0 and (self.stream.cfg_type == "initialize"):
+                    noise_pred_text = model_pred[1:]
+                    self.stream.stock_noise = torch.concat(
+                        [model_pred[0:1], self.stream.stock_noise[1:]], dim=0
+                    )
+                elif self.stream.guidance_scale > 1.0 and (self.stream.cfg_type == "full"):
+                    noise_pred_uncond, noise_pred_text = model_pred.chunk(2)
+                else:
+                    noise_pred_text = model_pred
+                
+                if self.stream.guidance_scale > 1.0 and (
+                    self.stream.cfg_type == "self" or self.stream.cfg_type == "initialize"
+                ):
+                    noise_pred_uncond = self.stream.stock_noise * self.stream.delta
+                
+                if self.stream.guidance_scale > 1.0 and self.stream.cfg_type != "none":
+                    model_pred = noise_pred_uncond + self.stream.guidance_scale * (
+                        noise_pred_text - noise_pred_uncond
+                    )
+                else:
+                    model_pred = noise_pred_text
+                
+                # Compute the previous noisy sample x_t -> x_t-1
+                if self.stream.use_denoising_batch:
+                    denoised_batch = self.stream.scheduler_step_batch(model_pred, x_t_latent, idx)
+                    if self.stream.cfg_type == "self" or self.stream.cfg_type == "initialize":
+                        scaled_noise = self.stream.beta_prod_t_sqrt * self.stream.stock_noise
+                        delta_x = self.stream.scheduler_step_batch(model_pred, scaled_noise, idx)
+                        alpha_next = torch.concat(
+                            [
+                                self.stream.alpha_prod_t_sqrt[1:],
+                                torch.ones_like(self.stream.alpha_prod_t_sqrt[0:1]),
+                            ],
+                            dim=0,
+                        )
+                        delta_x = alpha_next * delta_x
+                        beta_next = torch.concat(
+                            [
+                                self.stream.beta_prod_t_sqrt[1:],
+                                torch.ones_like(self.stream.beta_prod_t_sqrt[0:1]),
+                            ],
+                            dim=0,
+                        )
+                        delta_x = delta_x / beta_next
+                        init_noise = torch.concat(
+                            [self.stream.init_noise[1:], self.stream.init_noise[0:1]], dim=0
+                        )
+                        self.stream.stock_noise = init_noise + delta_x
+                else:
+                    denoised_batch = self.stream.scheduler_step_batch(model_pred, x_t_latent, idx)
+                
+                return denoised_batch, model_pred
+            
+            # Replace with patched method
+            self.stream.unet_step = patched_unet_step
+            
+            try:
+                if self.sd_turbo:
+                    image_tensor = self.stream.txt2img_sd_turbo(self.batch_size)
+                else:
+                    image_tensor = self.stream.txt2img(self.frame_buffer_size)
+            finally:
+                # Restore original method
+                self.stream.unet_step = original_unet_step
         else:
-            image_tensor = self.stream.txt2img(self.frame_buffer_size)
+            # Use original txt2img if no ControlNet
+            if self.sd_turbo:
+                image_tensor = self.stream.txt2img_sd_turbo(self.batch_size)
+            else:
+                image_tensor = self.stream.txt2img(self.frame_buffer_size)
+                
         image = self.postprocess_image(image_tensor, output_type=self.output_type)
 
         if self.use_safety_checker:
@@ -294,7 +568,102 @@ class StreamDiffusionWrapper:
         if isinstance(image, str) or isinstance(image, Image.Image):
             image = self.preprocess_image(image)
 
-        image_tensor = self.stream(image)
+        # Monkey patch the unet_step method if ControlNet is available
+        if self.controlnets and any(img is not None for img in self.controlnet_images):
+            original_unet_step = self.stream.unet_step
+            
+            def patched_unet_step(x_t_latent, t_list, idx=None):
+                if self.stream.guidance_scale > 1.0 and (self.stream.cfg_type == "initialize"):
+                    x_t_latent_plus_uc = torch.concat([x_t_latent[0:1], x_t_latent], dim=0)
+                    t_list_expanded = torch.concat([t_list[0:1], t_list], dim=0)
+                elif self.stream.guidance_scale > 1.0 and (self.stream.cfg_type == "full"):
+                    x_t_latent_plus_uc = torch.concat([x_t_latent, x_t_latent], dim=0)
+                    t_list_expanded = torch.concat([t_list, t_list], dim=0)
+                else:
+                    x_t_latent_plus_uc = x_t_latent
+                    t_list_expanded = t_list
+                
+                # Get combined ControlNet outputs
+                down_block_res_samples, mid_block_res_sample = self.get_controlnet_outputs(
+                    x_t_latent_plus_uc, t_list_expanded, self.stream.prompt_embeds
+                )
+                
+                # Call UNet with ControlNet outputs
+                model_pred = self.stream.unet(
+                    x_t_latent_plus_uc,
+                    t_list_expanded,
+                    encoder_hidden_states=self.stream.prompt_embeds,
+                    down_block_additional_residuals=down_block_res_samples,
+                    mid_block_additional_residual=mid_block_res_sample,
+                    return_dict=False,
+                )[0]
+                
+                # Continue with the original logic
+                if self.stream.guidance_scale > 1.0 and (self.stream.cfg_type == "initialize"):
+                    noise_pred_text = model_pred[1:]
+                    self.stream.stock_noise = torch.concat(
+                        [model_pred[0:1], self.stream.stock_noise[1:]], dim=0
+                    )
+                elif self.stream.guidance_scale > 1.0 and (self.stream.cfg_type == "full"):
+                    noise_pred_uncond, noise_pred_text = model_pred.chunk(2)
+                else:
+                    noise_pred_text = model_pred
+                
+                if self.stream.guidance_scale > 1.0 and (
+                    self.stream.cfg_type == "self" or self.stream.cfg_type == "initialize"
+                ):
+                    noise_pred_uncond = self.stream.stock_noise * self.stream.delta
+                
+                if self.stream.guidance_scale > 1.0 and self.stream.cfg_type != "none":
+                    model_pred = noise_pred_uncond + self.stream.guidance_scale * (
+                        noise_pred_text - noise_pred_uncond
+                    )
+                else:
+                    model_pred = noise_pred_text
+                
+                # Compute the previous noisy sample x_t -> x_t-1
+                if self.stream.use_denoising_batch:
+                    denoised_batch = self.stream.scheduler_step_batch(model_pred, x_t_latent, idx)
+                    if self.stream.cfg_type == "self" or self.stream.cfg_type == "initialize":
+                        scaled_noise = self.stream.beta_prod_t_sqrt * self.stream.stock_noise
+                        delta_x = self.stream.scheduler_step_batch(model_pred, scaled_noise, idx)
+                        alpha_next = torch.concat(
+                            [
+                                self.stream.alpha_prod_t_sqrt[1:],
+                                torch.ones_like(self.stream.alpha_prod_t_sqrt[0:1]),
+                            ],
+                            dim=0,
+                        )
+                        delta_x = alpha_next * delta_x
+                        beta_next = torch.concat(
+                            [
+                                self.stream.beta_prod_t_sqrt[1:],
+                                torch.ones_like(self.stream.beta_prod_t_sqrt[0:1]),
+                            ],
+                            dim=0,
+                        )
+                        delta_x = delta_x / beta_next
+                        init_noise = torch.concat(
+                            [self.stream.init_noise[1:], self.stream.init_noise[0:1]], dim=0
+                        )
+                        self.stream.stock_noise = init_noise + delta_x
+                else:
+                    denoised_batch = self.stream.scheduler_step_batch(model_pred, x_t_latent, idx)
+                
+                return denoised_batch, model_pred
+            
+            # Replace with patched method
+            self.stream.unet_step = patched_unet_step
+            
+            try:
+                image_tensor = self.stream(image)
+            finally:
+                # Restore original method
+                self.stream.unet_step = original_unet_step
+        else:
+            # Use original img2img if no ControlNet
+            image_tensor = self.stream(image)
+            
         image = self.postprocess_image(image_tensor, output_type=self.output_type)
 
         if self.use_safety_checker:

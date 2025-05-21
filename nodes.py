@@ -336,6 +336,9 @@ class StreamDiffusionSampler:
             outputs = []
             
             for i in range(batch_size):
+                # Update ControlNet images to the corresponding batch item if available
+                model.update_controlnet_image_for_batch(i)
+                
                 # Convert from BHWC to BCHW format for model input
                 image_tensor = image[i].permute(2, 0, 1).unsqueeze(0)
                 # Warmup model
